@@ -29,6 +29,7 @@
 #include <utils.h>
 #include <unistd.h>
 #include <sys/eventfd.h>
+#include <dlfcn.h>
 
 #include "internal.h"
 
@@ -50,11 +51,35 @@ struct filehandle {
 
 static struct filehandle fhs[MAXSOCK];
 
+static void libc_ptrs_init();
+static int (*libc_close)(int fd);
+
 int flextcp_fd_init(void)
 {
   return 0;
 }
 
+
+int flextcp_fd_dup(struct socket **polds, int oldfd, int newfd)
+{
+  //duplicate eventfd in kernel to make sure reserved
+  //if (libc_dup2(oldfd, newfd) < 0) return -1;
+
+  /* no more file handles available */
+  if (newfd >= MAXSOCK) {
+    /* TODO: enusure this is the libc close */
+    
+    libc_ptrs_init();
+    libc_close(newfd);
+    errno = EMFILE;
+    return -1;
+  }
+
+  fhs[newfd].data.s = *polds;
+  fhs[newfd].type = FH_SOCKET;
+
+  return newfd;
+}
 
 int flextcp_fd_salloc(struct socket **ps)
 {
@@ -76,7 +101,8 @@ int flextcp_fd_salloc(struct socket **ps)
   if (fd >= MAXSOCK) {
     free(s);
     /* TODO: enusure this is the libc close */
-    close(fd);
+    libc_ptrs_init();
+    libc_close(fd);
     errno = EMFILE;
     return -1;
   }
@@ -147,5 +173,35 @@ void flextcp_fd_close(int fd)
   fhs[fd].type = FH_UNUSED;
   MEM_BARRIER();
   /* TODO: enusure this is the libc close */
-  close(fd);
+  libc_ptrs_init();
+  libc_close(fd);
 }
+
+int flextcp_fd_eclose(int fd)
+{
+  int ret = flextcp_epoll_destroy(fd);
+  fhs[fd].data.e = NULL;
+  fhs[fd].type = FH_UNUSED;
+  MEM_BARRIER();
+  if(ret < 0) perror("tas eclose failed\n");
+  return ret;
+}
+
+static void libc_ptrs_init(void)
+{
+  void *handle;
+
+  if (libc_close != NULL) {
+    return;
+  }
+
+  if ((handle = dlopen("libc.so.6", RTLD_LAZY)) == NULL) {
+    perror("flextcp epoll init dlopen on libc failed");
+    abort();
+  }
+  if ((libc_close = dlsym(handle, "close")) == NULL) {
+    perror("flextcp init: dlsym close failed");
+    abort();
+  }
+}
+

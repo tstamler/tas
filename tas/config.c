@@ -68,7 +68,6 @@ enum cfg_params {
   CP_IP_ROUTE,
   CP_IP_ADDR,
   CP_FP_CORES_MAX,
-  CP_FP_NO_INTS,
   CP_DPDK_EXTRA,
 };
 
@@ -175,9 +174,6 @@ static struct option opts[] = {
     { .name = "fp-cores-max",
       .has_arg = required_argument,
       .val = CP_FP_CORES_MAX },
-    { .name = "fp-no-ints",
-      .has_arg = no_argument,
-      .val = CP_FP_NO_INTS },
     { .name = "dpdk-extra",
       .has_arg = required_argument,
       .val = CP_DPDK_EXTRA },
@@ -423,10 +419,6 @@ int config_parse(struct configuration *c, int argc, char *argv[])
           goto failed;
         }
         break;
-      case CP_FP_NO_INTS:
-        c->fp_interrupts = 0;
-        break;
-
       case CP_DPDK_EXTRA:
         if (parse_arg_append(optarg, c) != 0) {
           goto failed;
@@ -494,7 +486,6 @@ static int config_defaults(struct configuration *c, char *progname)
   c->cc_timely_min_rtt = 11;
   c->cc_timely_min_rate = 10000;
   c->fp_cores_max = 1;
-  c->fp_interrupts = 1;
 
   c->dpdk_argc = 1;
   if ((c->dpdk_argv = calloc(2, sizeof(*c->dpdk_argv))) == NULL) {
@@ -582,8 +573,6 @@ static void print_usage(struct configuration *c, char *progname)
       "Fast path:\n"
       "  --fp-cores-max=CORES        Max cores used for fast path "
           "[default: %"PRIu32"]\n"
-      "  --fp-no-ints                Disable Interrupts "
-          "[default: enabled]\n"
       "  --dpdk-extra=ARG            Add extra DPDK argument\n",
       progname,
       c->nic_rx_len, c->nic_tx_len, c->app_kin_len, c->app_kout_len,
@@ -702,7 +691,7 @@ failed:
 
 static inline int parse_arg_append(char *s, struct configuration *c)
 {
-  char **new;
+  void *new;
 
   if ((new = realloc(c->dpdk_argv, sizeof(char *) * (c->dpdk_argc + 2)))
       == NULL)
@@ -711,8 +700,7 @@ static inline int parse_arg_append(char *s, struct configuration *c)
     return -1;
   }
 
-  new[c->dpdk_argc++] = strdup(s);
-  c->dpdk_argv = new;
+  c->dpdk_argv[c->dpdk_argc++] = strdup(s);
 
   return 0;
 }

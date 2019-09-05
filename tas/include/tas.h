@@ -33,11 +33,7 @@ extern struct configuration config;
 extern void *tas_shm;
 extern struct flextcp_pl_mem *fp_state;
 extern struct flexnic_info *tas_info;
-#if RTE_VER_YEAR < 19
-  extern struct ether_addr eth_addr;
-#else
-  extern struct rte_ether_addr eth_addr;
-#endif
+extern struct ether_addr eth_addr;
 extern unsigned fp_cores_max;
 
 

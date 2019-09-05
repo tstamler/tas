@@ -100,4 +100,5 @@ int tas_epoll_pwait(int epfd, struct epoll_event *events, int maxevents,
 int tas_select(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exceptfds,
     struct timeval *timeout);
 
+int tas_dup2(int oldfd, int newfd);
 #endif /* ndef FLEXTCP_SOCKETS_H_ */

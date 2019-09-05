@@ -95,7 +95,8 @@ static inline int network_poll(struct network_thread *t, unsigned num,
   num = rte_eth_rx_burst(net_port_id, t->queue_id, mbs, num);
   if (num == 0) {
     return 0;
-  }
+  } 
+  //else fprintf(stderr, "fast path got %d packets\n", num);
 
 #ifdef FLEXNIC_TRACE_TX
   unsigned i;

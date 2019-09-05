@@ -32,6 +32,7 @@
 #include <dlfcn.h>
 #include <utils.h>
 #include <utils_timeout.h>
+#include <pthread.h>
 
 #include <tas_sockets.h>
 #include "internal.h"
@@ -85,6 +86,8 @@ int tas_epoll_create1(int flags)
     return -1;
   }
 
+  //fprintf(stderr, "creating epoll got %d from linux\n", fd);
+  
   if (flextcp_fd_ealloc(&ep, fd) < 0) {
     libc_close(fd);
     return -1;
@@ -93,6 +96,7 @@ int tas_epoll_create1(int flags)
   ep->inactive = NULL;
   ep->active_first = NULL;
   ep->active_last = NULL;
+  ep->num_tas = 0;
   ep->num_linux = 0;
   ep->linux_cnt = 0;
 
@@ -120,6 +124,7 @@ int tas_epoll_ctl(int epfd, int op, int fd, struct epoll_event *event)
   /* handle linux fds */
   if (flextcp_fd_slookup(fd, &s) != 0) {
     /* this is a linux fd */
+    //fprintf(stderr, "linux epoll_ctl on %d in ep %d with op %d\n", fd, epfd, op);
     if ((ret = libc_epoll_ctl(epfd, op, fd, event)) != 0) {
       goto out;
     }
@@ -134,6 +139,7 @@ int tas_epoll_ctl(int epfd, int op, int fd, struct epoll_event *event)
     goto out;
   }
 
+  //fprintf(stderr, "tas epoll_ctl on %d in ep %d with op %d\n", fd, epfd, op);
   /* look up socket on epoll */
   for (es = s->eps; es != NULL && es->ep != ep; es = es->so_next);
 
@@ -167,6 +173,7 @@ int tas_epoll_ctl(int epfd, int op, int fd, struct epoll_event *event)
       goto out;
     }
 
+    //fprintf(stderr, "adding tas %d to ep %d\n", fd, epfd);
     es->ep = ep;
     es->s = s;
     es->data = event->data;
@@ -191,9 +198,13 @@ int tas_epoll_ctl(int epfd, int op, int fd, struct epoll_event *event)
     if ((s->ep_events & es->mask) != 0) {
       es_activate(es);
     }
+
+    ep->num_tas++;
+
   } else if (op == EPOLL_CTL_MOD) {
     /* modify fd in epoll */
 
+    //fprintf(stderr, "modding tas %d on ep %d\n", fd, epfd);
     if (es == NULL) {
       /* socket not on this epoll */
       errno = ENOENT;
@@ -208,6 +219,7 @@ int tas_epoll_ctl(int epfd, int op, int fd, struct epoll_event *event)
   } else if (op == EPOLL_CTL_DEL) {
     /* remove fd from epoll */
 
+    //fprintf(stderr, "removing tas %d from ep %d\n", fd, epfd);
     if (es == NULL) {
       /* socket not on this epoll */
       errno = ENOENT;
@@ -215,6 +227,7 @@ int tas_epoll_ctl(int epfd, int op, int fd, struct epoll_event *event)
       goto out;
     }
 
+    ep->num_tas--;
     es_remove_sock(es);
     es_remove_ep(es);
     free(es);
@@ -245,8 +258,6 @@ int tas_epoll_wait(int epfd, struct epoll_event *events, int maxevents,
   libc_ptrs_init();
   EPOLL_DEBUG("flextcp_epoll_wait(%d, %d, %d)\n", epfd, maxevents, timeout);
 
-  /* fprintf(stderr, "flextcp_epoll_wait(%d, %d, %d) on %p\n", epfd, maxevents, timeout, (void *)pthread_self()); */
-
   if (maxevents <= 0) {
     errno = EINVAL;
     return -1;
@@ -257,11 +268,13 @@ int tas_epoll_wait(int epfd, struct epoll_event *events, int maxevents,
     return -1;
   }
 
-  if(ep->num_linux > 0) {
+  if(ep->num_tas == 0) {
     // XXX: Has Linux FDs - go straight to Linux
+    //fprintf(stderr, "straight to linux epoll_wait on %d, num active %d, num linux %d\n", epfd, ep->num_active, ep->num_linux);
     return libc_epoll_wait(epfd, events, maxevents, timeout);
   }
 
+  //fprintf(stderr, "tas epoll_wait\n");
   util_prefetch0(ep->active_first);
 
   /* calculate timeout */
@@ -309,26 +322,44 @@ again:
       }
     }
 
+    //fprintf(stderr, "block? nevents %d, n %d, timeout %d\n", nevents, n, timeout);
     // Block thread if nothing received for a while
     if (nevents == 0 && n == 0 && timeout != 0) {
       uint64_t cur_ms = get_msecs();
+      //fprintf(stderr, "block? cur_ms %lu, mtimeout %lu\n", cur_ms, mtimeout);
       if (timeout == -1 || mtimeout < cur_ms) {
+      //if (timeout == -1 || mtimeout > cur_ms) {
         uint32_t cur_ts = util_timeout_time_us();
 
         if(startwait == 0) {
           startwait = cur_ts;
         } else if(cur_ts - startwait >= POLL_CYCLE) {
           // Idle -- wait for data from apps/flexnic
-          flextcp_block(ctx, cur_ms - mtimeout);
+          //fprintf(stderr, "tas block time for %d\n", epfd);
+	  flextcp_block(ctx, cur_ms - mtimeout);
+	  //flextcp_block(ctx, mtimeout - cur_ms);
           // Gotta check again now that we woke up
           startwait = 0;
           goto again;
         }
       }
     }
+  //} while (n == 0 && timeout != 0 && (timeout == -1 || get_msecs() < mtimeout));
   } while (n == 0 && timeout != 0 && (timeout == -1 || mtimeout < get_msecs()));
 
-  ret = n;
+  if(ep->num_linux > 0) {
+    // XXX: Has Linux FDs - go straight to Linux
+    //fprintf(stderr, "linux epoll_wait after tas on %d, num active %d, num linux %d\n", epfd, ep->num_active, ep->num_linu
+    ret = libc_epoll_wait(epfd, events + n, maxevents - n, 0);
+    if(ret < 0) {
+	   ret = n;
+	   //perror("tas/linux epoll wait");
+    } else ret += n;
+  } 
+
+  //if(ret > 0)
+    //  fprintf(stderr, "tas epoll_wait on %d got %d tas events, %d linux events\n", epfd, n, ret - n);
+  
 /*out:*/
   flextcp_fd_release(epfd);
   EPOLL_DEBUG("        = %d\n", ret);
@@ -374,6 +405,36 @@ void flextcp_epoll_set(struct socket *s, uint32_t evts)
 
     es_activate(es);
   }
+}
+
+int flextcp_epoll_destroy(int epfd)
+{
+  struct epoll* ep;
+  struct epoll_socket* es;  
+  int ret;
+
+  libc_ptrs_init();
+  if (flextcp_fd_elookup(epfd, &ep) != 0) {
+    errno = EBADF;
+    return -1;
+  }
+
+  while(ep->active_first){
+    es = ep->active_first;
+    es_remove_sock(es);
+    es_remove_ep(es);
+    free(es);
+  }
+  while(ep->inactive){
+    es = ep->inactive;
+    es_remove_sock(es);
+    es_remove_ep(es);
+    free(es);
+  }
+
+  ret = libc_close(epfd);
+  free(ep);
+  return ret;
 }
 
 void flextcp_epoll_clear(struct socket *s, uint32_t evts)

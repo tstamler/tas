@@ -341,6 +341,7 @@ static inline ssize_t send_simple(int sockfd, const void *buf, size_t len,
   {
     errno = EAGAIN;
     ret = -1;
+    fprintf(stderr, "no space in transmit queue\n");
     goto out;
   }
 
@@ -348,7 +349,6 @@ static inline ssize_t send_simple(int sockfd, const void *buf, size_t len,
   ret = flextcp_connection_tx_alloc2(&s->data.connection.c, len, &dst_1, &len_1,
       &dst_2);
   if (ret < 0) {
-    fprintf(stderr, "sendmsg: flextcp_connection_tx_alloc failed\n");
     abort();
   }
 

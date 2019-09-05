@@ -60,6 +60,7 @@ int tas_init(void)
 int tas_socket(int domain, int type, int protocol)
 {
   struct socket *s;
+  struct flextcp_context *ctx;
   int fd;
   int nonblock = 0;
 
@@ -81,6 +82,9 @@ int tas_socket(int domain, int type, int protocol)
   s->flags = 0;
   flextcp_epoll_sockinit(s);
 
+  ctx = flextcp_sockctx_get();
+  if(ctx) s->core = ctx->ctx_id;
+
   if (nonblock) {
     fprintf(stderr, "socket set to nonblock\n");
     s->flags |= SOF_NONBLOCK;
@@ -93,12 +97,19 @@ int tas_close(int sockfd)
 {
   struct socket *s;
   struct flextcp_context *ctx;
+  struct epoll *e;
+
+  if (flextcp_fd_elookup(sockfd, &e) == 0) {
+    //fprintf(stderr, "closing epoll %d\n", sockfd);
+    return flextcp_fd_eclose(sockfd);
+  }
 
   if (flextcp_fd_slookup(sockfd, &s) != 0) {
     errno = EBADF;
     return -1;
   }
 
+  //fprintf(stderr, "closing socket %d\n", sockfd);
   flextcp_fd_close(sockfd);
 
   /* remove from epoll */
@@ -611,6 +622,21 @@ int tas_getsockopt(int sockfd, int level, int optname, void *optval,
     }
   } else if (level == SOL_SOCKET && optname == SO_REUSEPORT) {
     res = !!(s->flags & SOF_REUSEPORT);
+  } else if (level == SOL_SOCKET && optname == SO_REUSEADDR) {
+    fprintf(stderr, "flextcp getsockopt: SO_REUSEADDR not implemented, optname %u\n", optname);
+    errno = ENOPROTOOPT;
+    ret = -1;
+    goto out;
+  } else if (level == SOL_SOCKET && optname == SO_KEEPALIVE) {
+    fprintf(stderr, "flextcp getsockopt: SO_KEEPALIVE not implemented, optname %u\n", optname);
+    errno = ENOPROTOOPT;
+    ret = -1;
+    goto out;
+  } else if (level == SOL_SOCKET && optname == SO_LINGER) {
+    fprintf(stderr, "flextcp getsockopt: SO_LINGER not implemented, optname %u\n", optname);
+    errno = ENOPROTOOPT;
+    ret = -1;
+    goto out;
   } else {
     /* unknown option */
     fprintf(stderr, "flextcp getsockopt: unknown level optname combination "
@@ -681,6 +707,16 @@ int tas_setsockopt(int sockfd, int level, int optname, const void *optval,
   } else if (level == SOL_SOCKET && optname == SO_REUSEADDR) {
     fprintf(stderr, "flextcp setsockopt: Ignoring REUSEADDR\n");
     // Ignore...
+  } else if (level == SOL_SOCKET && optname == SO_KEEPALIVE) {
+    fprintf(stderr, "flextcp setsockopt: SO_KEEPALIVE not implemented, optname %u\n", optname);
+    errno = ENOPROTOOPT;
+    ret = -1;
+    goto out;
+  } else if (level == SOL_SOCKET && optname == SO_LINGER) {
+    fprintf(stderr, "flextcp setsockopt: SO_LINGER not implemented, optname %u\n", optname);
+    errno = ENOPROTOOPT;
+    ret = -1;
+    goto out;
   } else {
     /* unknown option */
     fprintf(stderr, "flextcp setsockopt: unknown level optname combination "
@@ -689,7 +725,6 @@ int tas_setsockopt(int sockfd, int level, int optname, const void *optval,
     ret = -1;
     goto out;
   }
-
 out:
   flextcp_fd_release(sockfd);
   return ret;
@@ -792,6 +827,7 @@ int tas_move_conn(int sockfd)
   if (s->data.connection.ctx == ctx) {
     errno = EISCONN;
     ret = -1;
+    //ret = 0;
     goto out;
   }
 
@@ -815,3 +851,16 @@ out:
   flextcp_fd_release(sockfd);
   return ret;
 }
+
+int tas_dup2(int oldfd, int newfd)
+{
+  struct socket *s_old;
+
+  if (flextcp_fd_slookup(oldfd, &s_old) != 0) {
+    errno = EBADF;
+    return -1;
+  }
+
+  return flextcp_fd_dup(&s_old, oldfd, newfd);
+}
+

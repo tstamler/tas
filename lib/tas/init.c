@@ -57,6 +57,9 @@ static inline void event_kappin_st_conn_closed(
 static inline int event_arx_connupdate(struct flextcp_context *ctx,
     struct flextcp_pl_arx_connupdate *inev,
     struct flextcp_event *outevs, int outn, uint16_t fn_core);
+static inline int event_arx_objupdate(struct flextcp_context *ctx,
+    struct flextcp_pl_arx_connupdate *inev, struct flextcp_event *outevs,
+    int outn);
 
 static int kernel_poll(struct flextcp_context *ctx, int num,
     struct flextcp_event *events, int *used) __attribute__((noinline));
@@ -226,6 +229,8 @@ static int fastpath_poll(struct flextcp_context *ctx, int num,
         break;
       } else if (arx->type == FLEXTCP_PL_ARX_CONNUPDATE) {
         j = event_arx_connupdate(ctx, &arx->msg.connupdate, events + i, num - i, ctx->next_queue);
+      } else if (arx->type == FLEXTCP_PL_ARX_OBJUPDATE) {
+        j = event_arx_objupdate(ctx, &arx->msg.connupdate, events + i, num - i);
       } else {
         fprintf(stderr, "flextcp_context_poll: kout type=%u head=%x\n", arx->type, head);
       }
@@ -402,7 +407,9 @@ static int fastpath_poll_vec(struct flextcp_context *ctx, int num,
 
       /* prefetch connection state for all entries */
       for (k = 0, q = ctx->next_queue; k < ctx->num_queues && i + l < num; k++) {
-        if (types[k] == FLEXTCP_PL_ARX_CONNUPDATE) {
+        if (types[k] == FLEXTCP_PL_ARX_CONNUPDATE ||
+            types[k] == FLEXTCP_PL_ARX_OBJUPDATE)
+        {
           arx = (struct flextcp_pl_arx *) (ctx->queues[q].rxq_base +
               qheads[q]);
           util_prefetch0(OPAQUE_PTR(arx->msg.connupdate.opaque) + 64);
@@ -436,6 +443,8 @@ static int fastpath_poll_vec(struct flextcp_context *ctx, int num,
       if (t == FLEXTCP_PL_ARX_CONNUPDATE) {
         j = event_arx_connupdate(ctx, &arx->msg.connupdate, events + i,
             num - i, q);
+      } else if (t == FLEXTCP_PL_ARX_OBJUPDATE) {
+        j = event_arx_objupdate(ctx, &arx->msg.connupdate, events + i, num - i);
       } else {
         j = 0;
         fprintf(stderr, "flextcp_context_poll: kout type=%u head=%x\n",
@@ -550,22 +559,34 @@ static inline int event_kappin_conn_opened(
     struct kernel_appin_conn_opened *inev, struct flextcp_event *outev,
     unsigned avail)
 {
+  struct flextcp_obj_connection *oconn;
   struct flextcp_connection *conn;
   int j = 1;
 
-  conn = OPAQUE_PTR(inev->opaque);
+  /* depending on whether this is an object connection, we issue different
+   * events */
+  if (OPAQUE_ISOBJ(inev->opaque)) {
+    oconn = OPAQUE_PTR(inev->opaque);
+    conn = &oconn->c;
 
-  outev->event_type = FLEXTCP_EV_CONN_OPEN;
-  outev->ev.conn_open.status = inev->status;
-  outev->ev.conn_open.conn = conn;
+    outev->event_type = FLEXTCP_EV_OBJ_CONN_OPEN;
+    outev->ev.obj_conn_open.status = inev->status;
+    outev->ev.obj_conn_open.conn = oconn;
+  } else {
+    conn = OPAQUE_PTR(inev->opaque);
+
+    outev->event_type = FLEXTCP_EV_CONN_OPEN;
+    outev->ev.conn_open.status = inev->status;
+    outev->ev.conn_open.conn = conn;
+  }
 
   if (inev->status != 0) {
     conn->status = CONN_CLOSED;
     return 1;
-  } else if (conn->rxb_used > 0 && conn->rx_closed && avail < 3) {
+  } else if (conn->rxb_head > 0 && conn->rx_closed && avail < 3) {
     /* if we've already received updates, we'll need to inject them */
     return -1;
-  } else if ((conn->rxb_used > 0 || conn->rx_closed) && avail < 2) {
+  } else if ((conn->rxb_head > 0 || conn->rx_closed) && avail < 2) {
     /* if we've already received updates, we'll need to inject them */
     return -1;
   }
@@ -585,13 +606,14 @@ static inline int event_kappin_conn_opened(
   conn->txb_len = inev->tx_len;
 
   /* inject bump if necessary */
-  if (conn->rxb_used > 0) {
-    conn->seq_rx += conn->rxb_used;
+  if (conn->rxb_head > 0) {
+    assert(conn->rxb_head < conn->rxb_len);
+    conn->seq_rx += conn->rxb_head;
 
     outev[j].event_type = FLEXTCP_EV_CONN_RECEIVED;
     outev[j].ev.conn_received.conn = conn;
     outev[j].ev.conn_received.buf = conn->rxb_base;
-    outev[j].ev.conn_received.len = conn->rxb_used;
+    outev[j].ev.conn_received.len = conn->rxb_head;
     j++;
   }
 
@@ -608,36 +630,60 @@ static inline int event_kappin_conn_opened(
 static inline void event_kappin_listen_newconn(
     struct kernel_appin_listen_newconn *inev, struct flextcp_event *outev)
 {
+  struct flextcp_obj_listener *olistener;
   struct flextcp_listener *listener;
 
-  listener = OPAQUE_PTR(inev->opaque);
+  /* depending on whether this is an object listener, we issue different
+   * events */
+  if (OPAQUE_ISOBJ(inev->opaque)) {
+    olistener = OPAQUE_PTR(inev->opaque);
 
-  outev->event_type = FLEXTCP_EV_LISTEN_NEWCONN;
-  outev->ev.listen_newconn.remote_ip = inev->remote_ip;
-  outev->ev.listen_newconn.remote_port = inev->remote_port;
-  outev->ev.listen_open.listener = listener;
+    outev->event_type = FLEXTCP_EV_OBJ_LISTEN_NEWCONN;
+    outev->ev.obj_listen_newconn.remote_ip = inev->remote_ip;
+    outev->ev.obj_listen_newconn.remote_port = inev->remote_port;
+    outev->ev.obj_listen_open.listener = olistener;
+  } else {
+    listener = OPAQUE_PTR(inev->opaque);
+
+    outev->event_type = FLEXTCP_EV_LISTEN_NEWCONN;
+    outev->ev.listen_newconn.remote_ip = inev->remote_ip;
+    outev->ev.listen_newconn.remote_port = inev->remote_port;
+    outev->ev.listen_open.listener = listener;
+  }
 }
 
 static inline int event_kappin_accept_conn(
     struct kernel_appin_accept_conn *inev, struct flextcp_event *outev,
     unsigned avail)
 {
+  struct flextcp_obj_connection *oconn;
   struct flextcp_connection *conn;
   int j = 1;
 
-  conn = OPAQUE_PTR(inev->opaque);
+  /* depending on whether this is an object connection, we issue different
+   * events */
+  if (OPAQUE_ISOBJ(inev->opaque)) {
+    oconn = OPAQUE_PTR(inev->opaque);
+    conn = &oconn->c;
 
-  outev->event_type = FLEXTCP_EV_LISTEN_ACCEPT;
-  outev->ev.listen_accept.status = inev->status;
-  outev->ev.listen_accept.conn = conn;
+    outev->event_type = FLEXTCP_EV_OBJ_LISTEN_ACCEPT;
+    outev->ev.obj_listen_accept.status = inev->status;
+    outev->ev.obj_listen_accept.conn = oconn;
+  } else {
+    conn = OPAQUE_PTR(inev->opaque);
+
+    outev->event_type = FLEXTCP_EV_LISTEN_ACCEPT;
+    outev->ev.listen_accept.status = inev->status;
+    outev->ev.listen_accept.conn = conn;
+  }
 
   if (inev->status != 0) {
     conn->status = CONN_CLOSED;
     return 1;
-  } else if (conn->rxb_used > 0 && conn->rx_closed && avail < 3) {
+  } else if (conn->rxb_head > 0 && conn->rx_closed && avail < 3) {
     /* if we've already received updates, we'll need to inject them */
     return -1;
-  } else if ((conn->rxb_used > 0 || conn->rx_closed) && avail < 2) {
+  } else if ((conn->rxb_head > 0 || conn->rx_closed) && avail < 2) {
     /* if we've already received updates, we'll need to inject them */
     return -1;
   }
@@ -658,13 +704,14 @@ static inline int event_kappin_accept_conn(
   conn->txb_len = inev->tx_len;
 
   /* inject bump if necessary */
-  if (conn->rxb_used > 0) {
-    conn->seq_rx += conn->rxb_used;
+  if (conn->rxb_head > 0) {
+    assert(conn->rxb_head < conn->rxb_len);
+    conn->seq_rx += conn->rxb_head;
 
     outev[j].event_type = FLEXTCP_EV_CONN_RECEIVED;
     outev[j].ev.conn_received.conn = conn;
     outev[j].ev.conn_received.buf = conn->rxb_base;
-    outev[j].ev.conn_received.len = conn->rxb_used;
+    outev[j].ev.conn_received.len = conn->rxb_head;
     j++;
   }
 
@@ -693,13 +740,24 @@ static inline void event_kappin_st_conn_move(
 static inline void event_kappin_st_listen_open(
     struct kernel_appin_status *inev, struct flextcp_event *outev)
 {
+  struct flextcp_obj_listener *olistener;
   struct flextcp_listener *listener;
 
-  listener = OPAQUE_PTR(inev->opaque);
+  /* depending on whether this is an object listener, we issue different
+   * events */
+  if (OPAQUE_ISOBJ(inev->opaque)) {
+    olistener = OPAQUE_PTR(inev->opaque);
 
-  outev->event_type = FLEXTCP_EV_LISTEN_OPEN;
-  outev->ev.listen_open.status = inev->status;
-  outev->ev.listen_open.listener = listener;
+    outev->event_type = FLEXTCP_EV_OBJ_LISTEN_OPEN;
+    outev->ev.obj_listen_open.status = inev->status;
+    outev->ev.obj_listen_open.listener = olistener;
+  } else {
+    listener = OPAQUE_PTR(inev->opaque);
+
+    outev->event_type = FLEXTCP_EV_LISTEN_OPEN;
+    outev->ev.listen_open.status = inev->status;
+    outev->ev.listen_open.listener = listener;
+  }
 }
 
 static inline void event_kappin_st_conn_closed(
@@ -721,7 +779,7 @@ static inline int event_arx_connupdate(struct flextcp_context *ctx,
     int outn, uint16_t fn_core)
 {
   struct flextcp_connection *conn;
-  uint32_t rx_bump, rx_len, tx_bump, tx_sent;
+  uint32_t rx_bump, rx_len, tx_bump, tx_tail;
   int i = 0, evs_needed, tx_avail_ev, eos;
 
   conn = OPAQUE_PTR(inev->opaque);
@@ -740,7 +798,6 @@ static inline int event_arx_connupdate(struct flextcp_context *ctx,
     assert(tx_bump == 0);
     conn->rx_closed = !!eos;
     conn->rxb_head += rx_bump;
-    conn->rxb_used += rx_bump;
     /* TODO: should probably handle eos here as well */
     return 0;
   } else if (conn->status == CONN_CLOSED ||
@@ -767,11 +824,14 @@ static inline int event_arx_connupdate(struct flextcp_context *ctx,
     evs_needed++;
   }
 
-  tx_sent = conn->txb_sent - tx_bump;
+  tx_tail = conn->txb_tail + tx_bump;
+  if (tx_tail >= conn->txb_len) {
+    tx_tail -= conn->txb_len;
+  }
 
   /* if tx close was acked, also add that event */
   if ((conn->flags & CONN_FLAG_TXEOS_ALLOC) == CONN_FLAG_TXEOS_ALLOC &&
-      !tx_sent)
+      tx_tail == conn->txb_head)
   {
     evs_needed++;
   }
@@ -813,12 +873,11 @@ static inline int event_arx_connupdate(struct flextcp_context *ctx,
     if (conn->rxb_head >= conn->rxb_len) {
       conn->rxb_head -= conn->rxb_len;
     }
-    conn->rxb_used += rx_bump;
   }
 
   /* bump tx */
   if (tx_bump > 0) {
-    conn->txb_sent -= tx_bump;
+    conn->txb_tail = tx_tail;
 
     if (tx_avail_ev) {
       outevs[i].event_type = FLEXTCP_EV_CONN_SENDBUF;
@@ -841,7 +900,7 @@ static inline int event_arx_connupdate(struct flextcp_context *ctx,
       assert(!(conn->flags & CONN_FLAG_TXEOS_ACK));
 
       /* if this was the last bump, mark TX EOS as acked */
-      if (conn->txb_sent == 0) {
+      if (conn->txb_tail == conn->txb_head) {
         conn->flags |= CONN_FLAG_TXEOS_ACK;
 
         outevs[i].event_type = FLEXTCP_EV_CONN_TXCLOSED;
@@ -862,6 +921,134 @@ static inline int event_arx_connupdate(struct flextcp_context *ctx,
   return i;
 }
 
+static inline int event_arx_objupdate(struct flextcp_context *ctx,
+    struct flextcp_pl_arx_connupdate *inev, struct flextcp_event *outevs,
+    int outn)
+{
+  int i = 0, txev;
+  struct flextcp_obj_connection *oc;
+  struct flextcp_connection *conn;
+  struct flextcp_obj_conn_ctx *cc;
+  struct obj_hdr oh;
+  uint32_t obj_pos, obj_len = 0, data_start, data_len, rx_bump, tx_bump,
+           obj_end;
+  size_t l;
+
+  if (outn < 2) {
+    return -1;
+  }
+
+  oc = OPAQUE_PTR(inev->opaque);
+  conn = &oc->c;
+  cc = &oc->ctx[ctx->ctx_id];
+
+  assert(conn->status == CONN_OPEN);
+
+  rx_bump = inev->rx_bump;
+  tx_bump = inev->tx_bump;
+
+  /* catch notifications that don't bump RX */
+  if (rx_bump == 0) {
+    if (tx_bump > 0) {
+      oconn_lock(oc);
+      txev = flextcp_conn_txbuf_available(conn) == 0;
+      conn->txb_tail = circ_offset(conn->txb_tail, conn->txb_len, tx_bump);
+      oconn_unlock(oc);
+
+      if (txev) {
+        outevs[i].event_type = FLEXTCP_EV_CONN_SENDBUF;
+        outevs[i].ev.conn_sendbuf.conn = conn;
+        i++;
+      }
+    }
+    return i;
+  }
+
+  /* Now we know that there is definitely an RX bump */
+
+  /* Check if this is a new object */
+  obj_len = cc->obj_len_rem;
+  obj_pos = cc->obj_pos;
+  if (obj_len == 0) {
+    if (inev->rx_bump < sizeof(oh)) {
+      fprintf(stderr, "event_arx_objupdate: rx bump for new object smaller"
+          " than object header (got %u expect %zu)\n", inev->rx_bump,
+          sizeof(oh));
+      abort();
+    }
+
+    /* get object header */
+    circ_read(&oh, conn->rxb_base, conn->rxb_len, inev->rx_pos, sizeof(oh));
+
+    /* calculate object length */
+    obj_len = sizeof(oh) + oh.dstlen + f_beui32(oh.len);
+    obj_pos = inev->rx_pos;
+  }
+
+  if (rx_bump > obj_len) {
+    fprintf(stderr, "event_arx_objupdate: rx bump larger than object (got %u "
+        " expect %u)\n", rx_bump, obj_len);
+    abort();
+  }
+
+  obj_len -= rx_bump;
+
+  /* Check if this object is complete */
+  if (obj_len == 0) {
+    /* get object header */
+    circ_read(&oh, conn->rxb_base, conn->rxb_len, obj_pos, sizeof(oh));
+
+    /* calculate length and start position of data */
+    data_len = oh.dstlen + f_beui32(oh.len);
+    data_start = circ_offset(obj_pos, conn->rxb_len, sizeof(oh));
+
+    /* fill in event */
+    outevs[i].event_type = FLEXTCP_EV_OBJ_CONN_RECEIVED;
+    outevs[i].ev.obj_conn_received.handle.pos = obj_pos;
+    outevs[i].ev.obj_conn_received.conn = oc;
+    outevs[i].ev.obj_conn_received.dstlen = oh.dstlen;
+
+    circ_range(&outevs[i].ev.obj_conn_received.buf_1, &l,
+          &outevs[i].ev.obj_conn_received.buf_2, conn->rxb_base, conn->rxb_len,
+          data_start, data_len);
+    outevs[i].ev.obj_conn_received.len_1 = l;
+    outevs[i].ev.obj_conn_received.len_2 = data_len - l;
+    i++;
+
+    /* calculate object end position to update rx head */
+    obj_end = circ_offset(obj_pos, conn->rxb_len, sizeof(oh) + data_len);
+  }
+
+  /* update context local state */
+  cc->obj_len_rem = obj_len;
+  cc->obj_pos = obj_pos;
+
+  oconn_lock(oc);
+
+  /* if this object is beyond any previously received objects, bump rxb_head */
+  if (obj_len == 0 && circ_in_interval(conn->rxb_head, conn->rxb_tail,
+        conn->rxb_len, obj_end))
+  {
+    conn->rxb_head = obj_end;
+  }
+
+  /* bump tx */
+  if (tx_bump > 0) {
+    txev = flextcp_conn_txbuf_available(conn) == 0;
+
+    conn->txb_tail = circ_offset(conn->txb_tail, conn->txb_len, tx_bump);
+
+    if (txev) {
+      outevs[i].event_type = FLEXTCP_EV_OBJ_CONN_SENDBUF;
+      outevs[i].ev.obj_conn_sendbuf.conn = oc;
+      i++;
+    }
+  }
+
+  oconn_unlock(oc);
+
+  return i;
+}
 
 static void txq_probe(struct flextcp_context *ctx, unsigned n)
 {
@@ -909,6 +1096,7 @@ static void conns_bump(struct flextcp_context *ctx)
   uint8_t flags;
 
   while ((c = ctx->bump_pending_first) != NULL) {
+    //fprintf(stderr, "bumping, status %d\n", c->status);
     assert(c->status == CONN_OPEN);
 
     if (flextcp_context_tx_alloc(ctx, &atx, c->fn_core) != 0) {
@@ -921,8 +1109,8 @@ static void conns_bump(struct flextcp_context *ctx)
       flags |= FLEXTCP_PL_ATX_FLTXDONE;
     }
 
-    atx->msg.connupdate.rx_bump = c->rxb_bump;
-    atx->msg.connupdate.tx_bump = c->txb_bump;
+    atx->msg.connupdate.rx_tail = c->rxb_tail;
+    atx->msg.connupdate.tx_head = c->txb_head;
     atx->msg.connupdate.flow_id = c->flow_id;
     atx->msg.connupdate.bump_seq = c->bump_seq++;
     atx->msg.connupdate.flags = flags;
@@ -931,7 +1119,7 @@ static void conns_bump(struct flextcp_context *ctx)
 
     flextcp_context_tx_done(ctx, c->fn_core);
 
-    c->rxb_bump = c->txb_bump = 0;
+    c->rxb_nictail = c->rxb_tail;
     c->bump_pending = 0;
 
     if (c->bump_next == NULL) {

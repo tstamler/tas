@@ -111,6 +111,7 @@ struct socket {
   /** last epoll fd with EPOLLEXCLUSIVE */
   struct epoll_socket *eps_exc_last;
 #endif
+  uint32_t core;
 };
 
 struct epoll {
@@ -120,6 +121,7 @@ struct epoll {
   struct epoll_socket *active_first;
   struct epoll_socket *active_last;
 
+  uint32_t num_tas;
   uint32_t num_linux;
   uint32_t num_active;
   uint8_t linux_cnt;
@@ -142,7 +144,9 @@ struct epoll_socket {
 
 int flextcp_fd_init(void);
 int flextcp_fd_salloc(struct socket **ps);
+int flextcp_fd_dup(struct socket **ps, int oldfd, int newfd);
 int flextcp_fd_ealloc(struct epoll **pe, int fd);
+int flextcp_fd_eclose(int fd);
 int flextcp_fd_slookup(int fd, struct socket **ps);
 int flextcp_fd_elookup(int fd, struct epoll **pe);
 void flextcp_fd_release(int fd);
@@ -158,5 +162,7 @@ void flextcp_epoll_sockinit(struct socket *s);
 void flextcp_epoll_sockclose(struct socket *s);
 void flextcp_epoll_set(struct socket *s, uint32_t evts);
 void flextcp_epoll_clear(struct socket *s, uint32_t evts);
+
+int flextcp_epoll_destroy(int epfd);
 
 #endif /* ndef INTERNAL_H_ */

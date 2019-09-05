@@ -144,7 +144,8 @@ void tcp_poll(void)
 }
 
 int tcp_open(struct app_context *ctx, uint64_t opaque, uint32_t remote_ip,
-    uint16_t remote_port, uint32_t db_id, struct connection **pconn)
+    uint16_t remote_port, uint32_t db_id, int objconn, int objnohash,
+    struct connection **pconn)
 {
   int ret;
   struct connection *conn;
@@ -177,7 +178,8 @@ int tcp_open(struct app_context *ctx, uint64_t opaque, uint32_t remote_ip,
   conn->remote_seq = 0;
   conn->cnt_tx_pending = 0;
   conn->db_id = db_id;
-  conn->flags = 0;
+  conn->flags = (objconn ? NICIF_CONN_OBJCONN : 0) |
+      (objnohash ? NICIF_CONN_OBJNOHASH : 0);
 
   conn->comp.q = &conn_async_q;
   conn->comp.notify_fd = -1;
@@ -208,7 +210,8 @@ int tcp_open(struct app_context *ctx, uint64_t opaque, uint32_t remote_ip,
 }
 
 int tcp_listen(struct app_context *ctx, uint64_t opaque, uint16_t local_port,
-    uint32_t backlog, int reuseport, struct listener **listen)
+    uint32_t backlog, int reuseport, int objconn, int objnohash,
+    struct listener **listen)
 {
   struct listener *lst;
   uint32_t i;
@@ -299,7 +302,8 @@ int tcp_listen(struct app_context *ctx, uint64_t opaque, uint16_t local_port,
   lst->backlog_len = backlog;
   lst->backlog_pos = 0;
   lst->backlog_used = 0;
-  lst->flags = 0;
+  lst->flags = (objconn ? NICIF_CONN_OBJCONN : 0) |
+      (objnohash ? NICIF_CONN_OBJNOHASH : 0);
 
   /* add to port tables */
   if (reuseport == 0) {
@@ -315,6 +319,7 @@ int tcp_listen(struct app_context *ctx, uint64_t opaque, uint16_t local_port,
 
   *listen = lst;
 
+  //fprintf(stderr, "listening on port %d\n", local_port);
   return 0;
 }
 
@@ -371,12 +376,16 @@ void tcp_packet(const void *pkt, uint16_t len, uint32_t fn_core,
     return;
   }
 
+  //fprintf(stderr, "got tcp_packet\n");
   if ((c = conn_lookup(p)) != NULL) {
+    //fprintf(stderr, "conn tcp_packet\n");
     conn_packet(c, p, &opts, fn_core, flow_group);
   } else if ((l = listener_lookup(p)) != NULL) {
+    //fprintf(stderr, "listener tcp_packet\n");
     listener_packet(l, p, &opts, fn_core, flow_group);
   } else {
     /* send reset if the packet received wasn't a reset */
+    //fprintf(stderr, "reset tcp_packet\n");
     if (!(TCPH_FLAGS(&p->tcp) & TCP_RST))
       send_reset(p, &opts);
   }
@@ -596,9 +605,11 @@ static int conn_reg_synack(struct connection *c)
     ecn_flags = TCP_ECE;
   }
 
+  //fprintf(stderr, "sending SYNACK\n");
   /* send ACK */
   send_control(c, TCP_SYN | TCP_ACK | ecn_flags, 1, c->syn_ts, TCP_MSS);
 
+  //fprintf(stderr, "sent SYNACK, notifying app\n");
   appif_accept_conn(c, 0);
 
   return 0;
@@ -832,6 +843,7 @@ static void listener_packet(struct listener *l, const struct pkt_tcp *p,
     return;
   }
 
+  //fprintf(stderr, "got listener packet\n");
   /* make sure packet is not too long */
   len = sizeof(p->eth) + f_beui16(p->ip.len);
   if (len > sizeof(bls->buf)) {

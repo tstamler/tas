@@ -115,6 +115,7 @@ STATIC_ASSERT(sizeof(struct flextcp_pl_ktx) == 64, ktx_size);
 
 #define FLEXTCP_PL_ARX_INVALID    0x0
 #define FLEXTCP_PL_ARX_CONNUPDATE 0x1
+#define FLEXTCP_PL_ARX_OBJUPDATE  0x2
 
 #define FLEXTCP_PL_ARX_FLRXDONE  0x1
 
@@ -149,8 +150,8 @@ STATIC_ASSERT(sizeof(struct flextcp_pl_arx) == 32, arx_size);
 struct flextcp_pl_atx {
   union {
     struct {
-      uint32_t rx_bump;
-      uint32_t tx_bump;
+      uint32_t rx_tail;
+      uint32_t tx_head;
       uint32_t flow_id;
       uint16_t bump_seq;
       uint8_t  flags;
@@ -209,6 +210,8 @@ struct flextcp_pl_appctx {
 #define FLEXNIC_PL_OOO_RECV 1
 
 #define FLEXNIC_PL_FLOWST_SLOWPATH 1
+#define FLEXNIC_PL_FLOWST_OBJCONN 2
+#define FLEXNIC_PL_FLOWST_OBJNOHASH 4
 #define FLEXNIC_PL_FLOWST_ECN 8
 #define FLEXNIC_PL_FLOWST_TXFIN 16
 #define FLEXNIC_PL_FLOWST_RXFIN 32
@@ -276,8 +279,6 @@ struct flextcp_pl_flowst {
   uint32_t rx_ooo_len;
 #endif
 
-  /** Number of bytes available to be sent */
-  uint32_t tx_avail;
   /** Number of bytes up to next pos in the buffer that were sent but not
    * acknowledged yet. */
   uint32_t tx_sent;
@@ -285,6 +286,8 @@ struct flextcp_pl_flowst {
   uint32_t tx_next_pos;
   /** Sequence number of next segment to be sent */
   uint32_t tx_next_seq;
+  /** End of data that is ready to be sent */
+  uint32_t tx_head;
   /** Timestamp to echo in next packet */
   uint32_t tx_next_ts;
 
@@ -301,7 +304,13 @@ struct flextcp_pl_flowst {
   /** RTT estimate */
   uint32_t rtt_est;
 
+
 // 128
+  /** Bytes left in current object */
+  uint32_t tx_objrem;
+  /** Bytes left in current object */
+  uint32_t rx_objrem;
+
 } __attribute__((packed, aligned(64)));
 
 #define FLEXNIC_PL_FLOWHTE_VALID  (1 << 31)
